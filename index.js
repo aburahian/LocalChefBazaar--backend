@@ -17,7 +17,7 @@ const app = express();
 // middleware
 app.use(
   cors({
-    origin:process.env.CLIENT_DOMAIN,
+    origin: process.env.CLIENT_DOMAIN,
     credentials: true,
     optionSuccessStatus: 200,
   })
@@ -82,7 +82,7 @@ async function run() {
     // Save a plant data in db
     app.post("/meals", verifyJWT, verifyChef, async (req, res) => {
       const mealData = req.body;
-      
+
       const result = await mealsCollection.insertOne(mealData);
       res.send(result);
     });
@@ -201,19 +201,14 @@ async function run() {
     );
 
     // get all plants for a seller by email
-    app.get(
-      "/my-inventory/:email",
-      verifyJWT,
-      verifyChef,
-      async (req, res) => {
-        const email = req.params.email;
+    app.get("/my-inventory/:email", verifyJWT, verifyChef, async (req, res) => {
+      const email = req.params.email;
 
-        const result = await mealsCollection
-          .find({ "seller.email": email })
-          .toArray();
-        res.send(result);
-      }
-    );
+      const result = await mealsCollection
+        .find({ "seller.email": email })
+        .toArray();
+      res.send(result);
+    });
 
     // save or update a user in db
     app.post("/user", async (req, res) => {
@@ -280,14 +275,24 @@ async function run() {
       const result = await chefRequestsCollection.find().toArray();
       res.send(result);
     });
- // review endpoints
- app.post("/reviews", verifyJWT,  async (req, res) => {
-      const reviewsData = req.body;
-      
-      const result = await mealsCollection.insertOne(reviewsData);
+    // review endpoints
+    app.post("/reviews", verifyJWT, async (req, res) => {
+  try {
+    const reviewData = req.body;
+    reviewData.createdAt = new Date().toISOString();
+    const result = await reviewsCollection.insertOne(reviewData);
+    res.send({ success: true, review: reviewData });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ success: false, message: "Failed to submit review" });
+  }
+});
+
+    app.get("/reviews/:mealId", async (req, res) => {
+      const mealId = req.params.mealId;
+      const result = await reviewsCollection.find({ mealId }).toArray();
       res.send(result);
     });
-
     // get all users for admin
     app.get("/users", verifyJWT, verifyADMIN, async (req, res) => {
       const adminEmail = req.tokenEmail;
