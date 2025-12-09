@@ -55,6 +55,7 @@ async function run() {
     const ordersCollection = db.collection("orders");
     const usersCollection = db.collection("users");
     const chefRequestsCollection = db.collection("chefRequests");
+    const reviewsCollection = db.collection("reviews");
 
     // role middlewares
     const verifyADMIN = async (req, res, next) => {
@@ -80,9 +81,9 @@ async function run() {
 
     // Save a plant data in db
     app.post("/meals", verifyJWT, verifyChef, async (req, res) => {
-      const plantData = req.body;
-      console.log(plantData);
-      const result = await mealsCollection.insertOne(plantData);
+      const mealData = req.body;
+      
+      const result = await mealsCollection.insertOne(mealData);
       res.send(result);
     });
 
@@ -277,6 +278,13 @@ async function run() {
     // get all seller requests for admin
     app.get("/seller-requests", verifyJWT, verifyADMIN, async (req, res) => {
       const result = await chefRequestsCollection.find().toArray();
+      res.send(result);
+    });
+ // review endpoints
+ app.post("/reviews", verifyJWT,  async (req, res) => {
+      const reviewsData = req.body;
+      
+      const result = await mealsCollection.insertOne(reviewsData);
       res.send(result);
     });
 
