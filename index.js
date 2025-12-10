@@ -371,6 +371,16 @@ app.patch("/role-requests/reject/:id", verifyJWT, verifyADMIN, async (req, res) 
 
   res.send({ success: true });
 });
+app.patch("/make-fraud", verifyJWT, verifyADMIN, async (req, res) => {
+  const { email } = req.body;
+
+  const result = await usersCollection.updateOne(
+    { email },
+    { $set: { status: "fraud" } }
+  );
+
+  res.send({ message: "User marked as fraud", status: "fraud" });
+});
 
 
     // review endpoints
