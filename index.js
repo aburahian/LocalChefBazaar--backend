@@ -55,6 +55,7 @@ async function run() {
     const ordersCollection = db.collection("orders");
     const usersCollection = db.collection("users");
     const chefRequestsCollection = db.collection("chefRequests");
+     const roleRequestsCollection =db.collection("roleRequests")
     const reviewsCollection = db.collection("reviews");
 
     // role middlewares
@@ -80,11 +81,38 @@ async function run() {
     };
 
     // Save a plant data in db
-    app.post("/meals", verifyJWT, verifyChef, async (req, res) => {
-      const mealData = req.body;
+    // Generate new mealId (M001, M002, M003...)
+    const generateMealId = async () => {
+      const lastMeal = await mealsCollection
+        .find({})
+        .sort({ mealId: -1 })
+        .limit(1)
+        .toArray();
 
-      const result = await mealsCollection.insertOne(mealData);
-      res.send(result);
+      if (!lastMeal.length) return "M001";
+
+      const lastIdNum = parseInt(lastMeal[0].mealId.replace("M", ""));
+      const nextId = (lastIdNum + 1).toString().padStart(3, "0");
+
+      return `M${nextId}`;
+    };
+
+    app.post("/meals", verifyJWT, verifyChef, async (req, res) => {
+      try {
+        const mealData = req.body;
+
+    
+        mealData.mealId = await generateMealId();
+
+        mealData.createdAt = new Date().toISOString();
+
+        const result = await mealsCollection.insertOne(mealData);
+
+        res.send({ success: true, meal: mealData });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ success: false, message: "Failed to add meal" });
+      }
     });
 
     // get all plants from db
@@ -275,18 +303,90 @@ async function run() {
       const result = await chefRequestsCollection.find().toArray();
       res.send(result);
     });
+    app.post("/role-request", verifyJWT, async (req, res) => {
+  const { requestType } = req.body;
+  const email = req.tokenEmail;
+
+  const user = await usersCollection.findOne({ email });
+  if (!user) return res.status(404).send({ message: "User not found" });
+
+
+  const exist = await roleRequestsCollection.findOne({ userEmail: email, requestStatus: "pending" });
+  if (exist) {
+    return res.status(409).send({ message: "You already have a pending request" });
+  }
+
+  const requestData = {
+    userName: user.name || "",
+    userEmail: email,
+    requestType,
+    requestStatus: "pending",
+    requestTime: new Date().toISOString(),
+  };
+
+  await roleRequestsCollection.insertOne(requestData);
+  res.send({ success: true, message: "Request submitted", request: requestData });
+});
+app.get("/role-requests", verifyJWT, verifyADMIN, async (req, res) => {
+  const result = await roleRequestsCollection.find().toArray();
+  res.send(result);
+});
+app.patch("/role-requests/accept/:id", verifyJWT, verifyADMIN, async (req, res) => {
+  const id = req.params.id;
+  const request = await roleRequestsCollection.findOne({ _id: new ObjectId(id) });
+
+  if (!request) return res.status(404).send({ message: "Request not found" });
+
+  let updatedRole = request.requestType;
+  let roleUpdateData = {};
+
+  if (updatedRole === "chef") {
+    const chefId = "chef-" + Math.floor(1000 + Math.random() * 9000);
+    roleUpdateData = { role: "chef", chefId };
+  }
+
+  if (updatedRole === "admin") {
+    roleUpdateData = { role: "admin" };
+  }
+
+  await usersCollection.updateOne(
+    { email: request.userEmail },
+    { $set: roleUpdateData }
+  );
+
+  await roleRequestsCollection.updateOne(
+    { _id: new ObjectId(id) },
+    { $set: { requestStatus: "approved" } }
+  );
+
+  res.send({ success: true });
+});
+app.patch("/role-requests/reject/:id", verifyJWT, verifyADMIN, async (req, res) => {
+  const id = req.params.id;
+
+  await roleRequestsCollection.updateOne(
+    { _id: new ObjectId(id) },
+    { $set: { requestStatus: "rejected" } }
+  );
+
+  res.send({ success: true });
+});
+
+
     // review endpoints
     app.post("/reviews", verifyJWT, async (req, res) => {
-  try {
-    const reviewData = req.body;
-    reviewData.createdAt = new Date().toISOString();
-    const result = await reviewsCollection.insertOne(reviewData);
-    res.send({ success: true, review: reviewData });
-  } catch (err) {
-    console.error(err);
-    res.status(500).send({ success: false, message: "Failed to submit review" });
-  }
-});
+      try {
+        const reviewData = req.body;
+        reviewData.createdAt = new Date().toISOString();
+        const result = await reviewsCollection.insertOne(reviewData);
+        res.send({ success: true, review: reviewData });
+      } catch (err) {
+        console.error(err);
+        res
+          .status(500)
+          .send({ success: false, message: "Failed to submit review" });
+      }
+    });
 
     app.get("/reviews/:mealId", async (req, res) => {
       const mealId = req.params.mealId;
