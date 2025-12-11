@@ -32,7 +32,7 @@ const verifyJWT = async (req, res, next) => {
   try {
     const decoded = await admin.auth().verifyIdToken(token);
     req.tokenEmail = decoded.email;
-    console.log(decoded);
+
     next();
   } catch (err) {
     console.log(err);
@@ -54,8 +54,9 @@ async function run() {
     const mealsCollection = db.collection("meals");
     const ordersCollection = db.collection("orders");
     const usersCollection = db.collection("users");
+    const paymentCollection = db.collection("payments");
     const chefRequestsCollection = db.collection("chefRequests");
-     const roleRequestsCollection =db.collection("roleRequests")
+    const roleRequestsCollection = db.collection("roleRequests");
     const reviewsCollection = db.collection("reviews");
 
     // role middlewares
@@ -80,18 +81,16 @@ async function run() {
       next();
     };
 
-    // Save a plant data in db
-    // Generate new mealId (M001, M002, M003...)
     const generateMealId = async () => {
       const lastMeal = await mealsCollection
-        .find({})
+        .find({ mealId: { $exists: true } })
         .sort({ mealId: -1 })
         .limit(1)
         .toArray();
 
       if (!lastMeal.length) return "M001";
 
-      const lastIdNum = parseInt(lastMeal[0].mealId.replace("M", ""));
+      const lastIdNum = parseInt(lastMeal[0].mealId.replace("M", ""), 10);
       const nextId = (lastIdNum + 1).toString().padStart(3, "0");
 
       return `M${nextId}`;
@@ -101,7 +100,6 @@ async function run() {
       try {
         const mealData = req.body;
 
-    
         mealData.mealId = await generateMealId();
 
         mealData.createdAt = new Date().toISOString();
@@ -129,89 +127,126 @@ async function run() {
     });
 
     // Payment endpoints
-    app.post("/create-checkout-session", async (req, res) => {
-      const paymentInfo = req.body;
-      console.log(paymentInfo);
-      const session = await stripe.checkout.sessions.create({
-        line_items: [
-          {
-            price_data: {
-              currency: "usd",
-              product_data: {
-                name: paymentInfo?.name,
-                description: paymentInfo?.description,
-                images: [paymentInfo.image],
-              },
-              unit_amount: paymentInfo?.price * 100,
+app.post("/create-checkout-session", async (req, res) => {
+  try {
+    const paymentInfo = req.body;
+
+    // Accept either price or cost
+    const price = paymentInfo.price || paymentInfo.cost;
+    if (!price) return res.status(400).send({ message: "Price is required" });
+
+    const session = await stripe.checkout.sessions.create({
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: {
+              name: paymentInfo.mealName || paymentInfo.name,
+              images: [paymentInfo.image],
             },
-            quantity: paymentInfo?.quantity,
+            unit_amount: price * 100,
           },
-        ],
-        customer_email: paymentInfo?.customer?.email,
-        mode: "payment",
-        metadata: {
-          plantId: paymentInfo?.plantId,
-          customer: paymentInfo?.customer.email,
+          quantity: paymentInfo.quantity || 1,
         },
-        success_url: `${process.env.CLIENT_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${process.env.CLIENT_DOMAIN}/plant/${paymentInfo?.plantId}`,
-      });
-      res.send({ url: session.url });
+      ],
+      customer_email: paymentInfo.customer?.email,
+      mode: "payment",
+      metadata: {
+        mealId: paymentInfo.mealId,
+        customerEmail: paymentInfo.customer?.email,
+      },
+      success_url: `${process.env.CLIENT_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.CLIENT_DOMAIN}/meals/${paymentInfo.mealId}`,
+    });
+
+    res.send({ url: session.url });
+  } catch (error) {
+    console.log("STRIPE ERROR:", error);
+    res.status(500).send({ error: error.message });
+  }
+});
+
+
+    app.post("/orders", async (req, res) => {
+      const result = await ordersCollection.insertOne(req.body);
+      res.send(result);
+    });
+    app.get("/my-orders", verifyJWT, async (req, res) => {
+      const result = await ordersCollection
+        .find({ userEmail: req.tokenEmail })
+        .toArray();
+      res.send(result);
+    });
+
+    app.patch("/update-order-status/:id", async (req, res) => {
+      const id = req.params.id;
+      const { status } = req.body;
+
+      const result = await ordersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { orderStatus: status } }
+      );
+
+      res.send(result);
     });
 
     app.post("/payment-success", async (req, res) => {
       const { sessionId } = req.body;
-      const session = await stripe.checkout.sessions.retrieve(sessionId);
-      const plant = await plantsCollection.findOne({
-        _id: new ObjectId(session.metadata.plantId),
-      });
-      const order = await ordersCollection.findOne({
-        transactionId: session.payment_intent,
-      });
 
-      if (session.status === "complete" && plant && !order) {
-        // save order data in db
-        const orderInfo = {
-          plantId: session.metadata.plantId,
-          transactionId: session.payment_intent,
-          customer: session.metadata.customer,
-          status: "pending",
-          seller: plant.seller,
-          name: plant.name,
-          category: plant.category,
-          quantity: 1,
-          price: session.amount_total / 100,
-          image: plant?.image,
-        };
-        const result = await ordersCollection.insertOne(orderInfo);
-        // update plant quantity
-        await plantsCollection.updateOne(
-          {
-            _id: new ObjectId(session.metadata.plantId),
-          },
-          { $inc: { quantity: -1 } }
-        );
-
-        return res.send({
-          transactionId: session.payment_intent,
-          orderId: result.insertedId,
+      try {
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        const meal = await mealsCollection.findOne({
+          _id: new ObjectId(session.metadata.mealId),
         });
-      }
-      res.send(
-        res.send({
+        const order = await paymentCollection.findOne({
           transactionId: session.payment_intent,
-          orderId: order._id,
-        })
-      );
+        });
+
+        if (session.payment_status === "paid" && meal && !order) {
+          const orderInfo = {
+            mealId: session.metadata.mealId,
+            transactionId: session.payment_intent,
+            customer: session.metadata.customer,
+            status: "pending",
+            chef: meal.chef,
+            name: meal.name,
+            category: meal.category,
+            quantity: 1,
+            price: session.amount_total / 100,
+            image: meal?.image,
+          };
+
+          const result = await paymentCollection.insertOne(orderInfo);
+
+          await ordersCollection.updateOne(
+            { _id: new ObjectId(session.metadata.mealId) },
+            {
+              paymentStatus: "paid",
+            }
+          );
+
+          return res.send({
+            transactionId: session.payment_intent,
+            orderId: result.insertedId,
+          });
+        }
+
+        // If order already exists
+        if (order) {
+          return res.send({
+            transactionId: session.payment_intent,
+            orderId: order._id,
+          });
+        }
+
+        res.status(404).send({ message: "Meal or session not found" });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ error: "Server error" });
+      }
     });
 
     // get all orders for a customer by email
-    app.get("/my-orders", verifyJWT, async (req, res) => {
-      const result = await ordersCollection
-        .find({ customer: req.tokenEmail })
-        .toArray();
-      res.send(result);
-    });
 
     // get all orders for a seller by email
     app.get(
@@ -219,22 +254,57 @@ async function run() {
       verifyJWT,
       verifyChef,
       async (req, res) => {
-        const email = req.params.email;
+        try {
+          const paramEmail = req.params.email;
 
-        const result = await ordersCollection
-          .find({ "seller.email": email })
-          .toArray();
-        res.send(result);
+          // security: ensure the token owner is the same as the requested email
+          if (req.tokenEmail !== paramEmail) {
+            return res
+              .status(403)
+              .send({ message: "Forbidden: email mismatch" });
+          }
+
+          // get chef record to obtain chefId
+          const chefUser = await usersCollection.findOne({ email: paramEmail });
+          if (!chefUser || !chefUser.chefId) {
+            return res
+              .status(404)
+              .send({ message: "Chef not found or missing chefId" });
+          }
+
+          const chefId = chefUser.chefId;
+
+          // return orders for this chefId
+          const result = await ordersCollection.find({ chefId }).toArray();
+          res.send(result);
+        } catch (err) {
+          console.error("GET /manage-orders error:", err);
+          res.status(500).send({ message: "Failed to fetch chef orders" });
+        }
       }
     );
 
     // get all plants for a seller by email
-    app.get("/my-inventory/:email", verifyJWT, verifyChef, async (req, res) => {
+    app.get("/my-meals/:email", verifyJWT, verifyChef, async (req, res) => {
       const email = req.params.email;
 
-      const result = await mealsCollection
-        .find({ "seller.email": email })
-        .toArray();
+      const result = await mealsCollection.find({ chefEmail: email }).toArray();
+      res.send(result);
+    });
+    app.delete("/meals/:id", verifyJWT, verifyChef, async (req, res) => {
+      const id = req.params.id;
+      const result = await mealsCollection.deleteOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+    app.put("/meals/:id", verifyJWT, verifyChef, async (req, res) => {
+      const id = req.params.id;
+      const updatedMeal = req.body;
+
+      const result = await mealsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: updatedMeal }
+      );
+
       res.send(result);
     });
 
@@ -242,7 +312,7 @@ async function run() {
     app.post("/user", async (req, res) => {
       try {
         const userData = req.body;
-        console.log("Received user data:", userData); // Log incoming data
+
 
         userData.created_at = new Date().toISOString();
         userData.last_loggedIn = new Date().toISOString();
@@ -255,10 +325,10 @@ async function run() {
         };
 
         const alreadyExists = await usersCollection.findOne(query);
-        console.log("User Already Exists---> ", !!alreadyExists);
+  
 
         if (alreadyExists) {
-          console.log("Updating user info......");
+      
           const result = await usersCollection.updateOne(query, {
             $set: {
               last_loggedIn: new Date().toISOString(),
@@ -267,9 +337,9 @@ async function run() {
           return res.send(result);
         }
 
-        console.log("Saving new user info......");
+
         const result = await usersCollection.insertOne(userData);
-        console.log("User saved result:", result); // Log the result of insertion
+
         res.send(result);
       } catch (error) {
         console.error("Error in /user endpoint:", error);
@@ -279,14 +349,23 @@ async function run() {
       }
     });
 
-    // get a user's role
     app.get("/user/role", verifyJWT, async (req, res) => {
       const result = await usersCollection.findOne({ email: req.tokenEmail });
       res.send({ role: result?.role });
     });
+    app.get("/user/:email", async (req, res) => {
+      const email = req.params.email;
+      try {
+        const user = await usersCollection.findOne({ email });
+        if (!user) return res.status(404).send({ message: "User not found" });
+        res.send(user);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
 
-    // save become-seller request
-    app.post("/become-seller", verifyJWT, async (req, res) => {
+    app.post("/become-chef", verifyJWT, async (req, res) => {
       const email = req.tokenEmail;
       const alreadyExists = await chefRequestsCollection.findOne({ email });
       if (alreadyExists)
@@ -299,89 +378,109 @@ async function run() {
     });
 
     // get all seller requests for admin
-    app.get("/seller-requests", verifyJWT, verifyADMIN, async (req, res) => {
+    app.get("/chef-requests", verifyJWT, verifyADMIN, async (req, res) => {
       const result = await chefRequestsCollection.find().toArray();
       res.send(result);
     });
     app.post("/role-request", verifyJWT, async (req, res) => {
-  const { requestType } = req.body;
-  const email = req.tokenEmail;
+      const { requestType } = req.body;
+      const email = req.tokenEmail;
 
-  const user = await usersCollection.findOne({ email });
-  if (!user) return res.status(404).send({ message: "User not found" });
+      const user = await usersCollection.findOne({ email });
+      if (!user) return res.status(404).send({ message: "User not found" });
 
+      const exist = await roleRequestsCollection.findOne({
+        userEmail: email,
+        requestStatus: "pending",
+      });
+      if (exist) {
+        return res
+          .status(409)
+          .send({ message: "You already have a pending request" });
+      }
 
-  const exist = await roleRequestsCollection.findOne({ userEmail: email, requestStatus: "pending" });
-  if (exist) {
-    return res.status(409).send({ message: "You already have a pending request" });
-  }
+      const requestData = {
+        userName: user.name || "",
+        userEmail: email,
+        requestType,
+        requestStatus: "pending",
+        requestTime: new Date().toISOString(),
+      };
 
-  const requestData = {
-    userName: user.name || "",
-    userEmail: email,
-    requestType,
-    requestStatus: "pending",
-    requestTime: new Date().toISOString(),
-  };
+      await roleRequestsCollection.insertOne(requestData);
+      res.send({
+        success: true,
+        message: "Request submitted",
+        request: requestData,
+      });
+    });
+    app.get("/role-requests", verifyJWT, verifyADMIN, async (req, res) => {
+      const result = await roleRequestsCollection.find().toArray();
+      res.send(result);
+    });
+    app.patch(
+      "/role-requests/accept/:id",
+      verifyJWT,
+      verifyADMIN,
+      async (req, res) => {
+        const id = req.params.id;
+        const request = await roleRequestsCollection.findOne({
+          _id: new ObjectId(id),
+        });
 
-  await roleRequestsCollection.insertOne(requestData);
-  res.send({ success: true, message: "Request submitted", request: requestData });
-});
-app.get("/role-requests", verifyJWT, verifyADMIN, async (req, res) => {
-  const result = await roleRequestsCollection.find().toArray();
-  res.send(result);
-});
-app.patch("/role-requests/accept/:id", verifyJWT, verifyADMIN, async (req, res) => {
-  const id = req.params.id;
-  const request = await roleRequestsCollection.findOne({ _id: new ObjectId(id) });
+        if (!request)
+          return res.status(404).send({ message: "Request not found" });
 
-  if (!request) return res.status(404).send({ message: "Request not found" });
+        let updatedRole = request.requestType;
+        let roleUpdateData = {};
 
-  let updatedRole = request.requestType;
-  let roleUpdateData = {};
+        if (updatedRole === "chef") {
+          const chefId = "chef-" + Math.floor(1000 + Math.random() * 9000);
+          roleUpdateData = { role: "chef", chefId };
+        }
 
-  if (updatedRole === "chef") {
-    const chefId = "chef-" + Math.floor(1000 + Math.random() * 9000);
-    roleUpdateData = { role: "chef", chefId };
-  }
+        if (updatedRole === "admin") {
+          roleUpdateData = { role: "admin" };
+        }
 
-  if (updatedRole === "admin") {
-    roleUpdateData = { role: "admin" };
-  }
+        await usersCollection.updateOne(
+          { email: request.userEmail },
+          { $set: roleUpdateData }
+        );
 
-  await usersCollection.updateOne(
-    { email: request.userEmail },
-    { $set: roleUpdateData }
-  );
+        await roleRequestsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { requestStatus: "approved" } }
+        );
 
-  await roleRequestsCollection.updateOne(
-    { _id: new ObjectId(id) },
-    { $set: { requestStatus: "approved" } }
-  );
+        res.send({ success: true });
+      }
+    );
+    app.patch(
+      "/role-requests/reject/:id",
+      verifyJWT,
+      verifyADMIN,
+      async (req, res) => {
+        const id = req.params.id;
 
-  res.send({ success: true });
-});
-app.patch("/role-requests/reject/:id", verifyJWT, verifyADMIN, async (req, res) => {
-  const id = req.params.id;
+        await roleRequestsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { requestStatus: "rejected" } }
+        );
 
-  await roleRequestsCollection.updateOne(
-    { _id: new ObjectId(id) },
-    { $set: { requestStatus: "rejected" } }
-  );
+        res.send({ success: true });
+      }
+    );
+    app.patch("/make-fraud", verifyJWT, verifyADMIN, async (req, res) => {
+      const { email } = req.body;
 
-  res.send({ success: true });
-});
-app.patch("/make-fraud", verifyJWT, verifyADMIN, async (req, res) => {
-  const { email } = req.body;
+      const result = await usersCollection.updateOne(
+        { email },
+        { $set: { status: "fraud" } }
+      );
 
-  const result = await usersCollection.updateOne(
-    { email },
-    { $set: { status: "fraud" } }
-  );
-
-  res.send({ message: "User marked as fraud", status: "fraud" });
-});
-
+      res.send({ message: "User marked as fraud", status: "fraud" });
+    });
 
     // review endpoints
     app.post("/reviews", verifyJWT, async (req, res) => {
