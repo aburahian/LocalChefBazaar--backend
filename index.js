@@ -126,15 +126,14 @@ async function run() {
       res.send(result);
     });
 
-    // Payment endpoints
     app.post("/create-checkout-session", async (req, res) => {
       try {
         const paymentInfo = req.body;
 
-        // Accept either price or cost
         const price = paymentInfo.price || paymentInfo.cost;
-        if (!price)
+        if (!price) {
           return res.status(400).send({ message: "Price is required" });
+        }
 
         const session = await stripe.checkout.sessions.create({
           line_items: [
@@ -142,28 +141,33 @@ async function run() {
               price_data: {
                 currency: "usd",
                 product_data: {
-                  name: paymentInfo.mealName || paymentInfo.name,
+                  name: paymentInfo.mealName,
                   images: [paymentInfo.image],
                 },
-                unit_amount: price * 100,
+                unit_amount: Math.round(price * 100),
               },
               quantity: paymentInfo.quantity || 1,
             },
           ],
           customer_email: paymentInfo.customer?.email,
+
           mode: "payment",
+
           metadata: {
+           orderId: paymentInfo.orderId, 
             mealId: paymentInfo.mealId,
             customerEmail: paymentInfo.customer?.email,
+            quantity: paymentInfo.quantity,
           },
+
           success_url: `${process.env.CLIENT_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${process.env.CLIENT_DOMAIN}/meals/${paymentInfo.mealId}`,
         });
 
-        res.send({ url: session.url });
+        return res.send({ url: session.url });
       } catch (error) {
         console.log("STRIPE ERROR:", error);
-        res.status(500).send({ error: error.message });
+        return res.status(500).send({ error: error.message });
       }
     });
 
@@ -191,64 +195,48 @@ async function run() {
     });
 
     app.post("/payment-success", async (req, res) => {
-      const { sessionId } = req.body;
-
       try {
+        const { sessionId } = req.body;
+
+
+        if (!sessionId) {
+          return res.status(400).send({ error: "sessionId missing" });
+        }
+
         const session = await stripe.checkout.sessions.retrieve(sessionId);
-        const meal = await mealsCollection.findOne({
-          _id: new ObjectId(session.metadata.mealId),
-        });
-        const order = await paymentCollection.findOne({
-          transactionId: session.payment_intent,
-        });
 
-        if (session.payment_status === "paid" && meal && !order) {
-          const orderInfo = {
-            mealId: session.metadata.mealId,
-            transactionId: session.payment_intent,
-            customer: session.metadata.customer,
-            status: "pending",
-            chef: meal.chef,
-            name: meal.name,
-            category: meal.category,
-            quantity: 1,
-            price: session.amount_total / 100,
-            image: meal?.image,
-          };
-
-          const result = await paymentCollection.insertOne(orderInfo);
-
-          await ordersCollection.updateOne(
-            { _id: new ObjectId(session.metadata.mealId) },
-            {
-              paymentStatus: "paid",
-            }
-          );
-
-          return res.send({
-            transactionId: session.payment_intent,
-            orderId: result.insertedId,
-          });
+        if (!session.metadata || !session.metadata.mealId) {
+          return res.status(400).send({ error: "mealId missing in metadata" });
         }
+ 
 
-        // If order already exists
-        if (order) {
-          return res.send({
-            transactionId: session.payment_intent,
-            orderId: order._id,
-          });
-        }
 
-        res.status(404).send({ message: "Meal or session not found" });
-      } catch (err) {
-        console.error(err);
-        res.status(500).send({ error: "Server error" });
+        const orderInfo = {
+          transactionId: session.id,
+    
+          mealId:session.metadata.mealId,
+          customerEmail: session.customer_email,
+          amount: session.amount_total / 100,
+          paymentStatus: "paid",
+          paymentDate: new Date(),
+        };
+        const paymentResult = await paymentCollection.insertOne(orderInfo);
+        const orderUpdateResult = await ordersCollection.updateOne(
+           { _id: new ObjectId(session.metadata.orderId) },
+          { $set: { paymentStatus: "paid" } }
+        );
+
+        return res.send({
+          success: true,
+          paymentInserted: paymentResult.insertedId,
+          orderUpdated: orderUpdateResult.modifiedCount > 0,
+        });
+      } catch (error) {
+        console.error("Payment Success Error:", error);
+        return res.status(500).send({ error: "Internal server error" });
       }
     });
 
-    // get all orders for a customer by email
-
-    // get all orders for a seller by email
     app.get(
       "/manage-orders/:email",
       verifyJWT,
@@ -257,14 +245,12 @@ async function run() {
         try {
           const paramEmail = req.params.email;
 
-          // security: ensure the token owner is the same as the requested email
           if (req.tokenEmail !== paramEmail) {
             return res
               .status(403)
               .send({ message: "Forbidden: email mismatch" });
           }
 
-          // get chef record to obtain chefId
           const chefUser = await usersCollection.findOne({ email: paramEmail });
           if (!chefUser || !chefUser.chefId) {
             return res
@@ -274,7 +260,7 @@ async function run() {
 
           const chefId = chefUser.chefId;
 
-          // return orders for this chefId
+
           const result = await ordersCollection.find({ chefId }).toArray();
           res.send(result);
         } catch (err) {
@@ -284,7 +270,6 @@ async function run() {
       }
     );
 
-    // get all plants for a seller by email
     app.get("/my-meals/:email", verifyJWT, verifyChef, async (req, res) => {
       const email = req.params.email;
 
@@ -343,7 +328,7 @@ async function run() {
       }
     });
 
-    // Get all favorite meals for a user
+
     app.get("/favorites", verifyJWT, async (req, res) => {
       const userEmail = req.tokenEmail;
 
@@ -359,7 +344,7 @@ async function run() {
       }
     });
 
-    // Remove a favorite meal
+
     app.delete("/favorites/:id", verifyJWT, async (req, res) => {
       const mealId = req.params.id;
       const userEmail = req.tokenEmail;
@@ -382,7 +367,7 @@ async function run() {
       }
     });
 
-    // save or update a user in db
+
     app.post("/user", async (req, res) => {
       try {
         const userData = req.body;
@@ -447,7 +432,7 @@ async function run() {
       res.send(result);
     });
 
-    // get all seller requests for admin
+
     app.get("/chef-requests", verifyJWT, verifyADMIN, async (req, res) => {
       const result = await chefRequestsCollection.find().toArray();
       res.send(result);
@@ -646,13 +631,13 @@ async function run() {
       res.send(result);
     });
 
-    // Send a ping to confirm a successful connection
+
     await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
   } finally {
-    // Ensures that the client will close when you finish/error
+    
   }
 }
 run().catch(console.dir);
