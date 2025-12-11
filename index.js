@@ -127,45 +127,45 @@ async function run() {
     });
 
     // Payment endpoints
-app.post("/create-checkout-session", async (req, res) => {
-  try {
-    const paymentInfo = req.body;
+    app.post("/create-checkout-session", async (req, res) => {
+      try {
+        const paymentInfo = req.body;
 
-    // Accept either price or cost
-    const price = paymentInfo.price || paymentInfo.cost;
-    if (!price) return res.status(400).send({ message: "Price is required" });
+        // Accept either price or cost
+        const price = paymentInfo.price || paymentInfo.cost;
+        if (!price)
+          return res.status(400).send({ message: "Price is required" });
 
-    const session = await stripe.checkout.sessions.create({
-      line_items: [
-        {
-          price_data: {
-            currency: "usd",
-            product_data: {
-              name: paymentInfo.mealName || paymentInfo.name,
-              images: [paymentInfo.image],
+        const session = await stripe.checkout.sessions.create({
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: {
+                  name: paymentInfo.mealName || paymentInfo.name,
+                  images: [paymentInfo.image],
+                },
+                unit_amount: price * 100,
+              },
+              quantity: paymentInfo.quantity || 1,
             },
-            unit_amount: price * 100,
+          ],
+          customer_email: paymentInfo.customer?.email,
+          mode: "payment",
+          metadata: {
+            mealId: paymentInfo.mealId,
+            customerEmail: paymentInfo.customer?.email,
           },
-          quantity: paymentInfo.quantity || 1,
-        },
-      ],
-      customer_email: paymentInfo.customer?.email,
-      mode: "payment",
-      metadata: {
-        mealId: paymentInfo.mealId,
-        customerEmail: paymentInfo.customer?.email,
-      },
-      success_url: `${process.env.CLIENT_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.CLIENT_DOMAIN}/meals/${paymentInfo.mealId}`,
+          success_url: `${process.env.CLIENT_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.CLIENT_DOMAIN}/meals/${paymentInfo.mealId}`,
+        });
+
+        res.send({ url: session.url });
+      } catch (error) {
+        console.log("STRIPE ERROR:", error);
+        res.status(500).send({ error: error.message });
+      }
     });
-
-    res.send({ url: session.url });
-  } catch (error) {
-    console.log("STRIPE ERROR:", error);
-    res.status(500).send({ error: error.message });
-  }
-});
-
 
     app.post("/orders", async (req, res) => {
       const result = await ordersCollection.insertOne(req.body);
@@ -308,11 +308,84 @@ app.post("/create-checkout-session", async (req, res) => {
       res.send(result);
     });
 
+    app.post("/meals/favorite/:id", verifyJWT, async (req, res) => {
+      const mealId = req.params.id;
+      const { userEmail } = req.body;
+
+      if (!userEmail)
+        return res
+          .status(400)
+          .send({ success: false, message: "User email is required" });
+
+      try {
+        const meal = await mealsCollection.findOne({
+          _id: new ObjectId(mealId),
+        });
+        if (!meal)
+          return res
+            .status(404)
+            .send({ success: false, message: "Meal not found" });
+
+        const isFavorited = meal.favorites?.includes(userEmail);
+
+        const update = isFavorited
+          ? { $pull: { favorites: userEmail } }
+          : { $addToSet: { favorites: userEmail } };
+
+        await mealsCollection.updateOne({ _id: new ObjectId(mealId) }, update);
+
+        res.send({ success: true, favorited: !isFavorited });
+      } catch (err) {
+        console.error(err);
+        res
+          .status(500)
+          .send({ success: false, message: "Failed to toggle favorite" });
+      }
+    });
+
+    // Get all favorite meals for a user
+    app.get("/favorites", verifyJWT, async (req, res) => {
+      const userEmail = req.tokenEmail;
+
+      try {
+        const favorites = await mealsCollection
+          .find({ favorites: userEmail })
+          .toArray();
+
+        res.send(favorites);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to fetch favorite meals" });
+      }
+    });
+
+    // Remove a favorite meal
+    app.delete("/favorites/:id", verifyJWT, async (req, res) => {
+      const mealId = req.params.id;
+      const userEmail = req.tokenEmail;
+
+      try {
+        await mealsCollection.updateOne(
+          { _id: new ObjectId(mealId) },
+          { $pull: { favorites: userEmail } }
+        );
+
+        res.send({
+          success: true,
+          message: "Meal removed from favorites successfully.",
+        });
+      } catch (err) {
+        console.error(err);
+        res
+          .status(500)
+          .send({ success: false, message: "Failed to remove favorite meal" });
+      }
+    });
+
     // save or update a user in db
     app.post("/user", async (req, res) => {
       try {
         const userData = req.body;
-
 
         userData.created_at = new Date().toISOString();
         userData.last_loggedIn = new Date().toISOString();
@@ -325,10 +398,8 @@ app.post("/create-checkout-session", async (req, res) => {
         };
 
         const alreadyExists = await usersCollection.findOne(query);
-  
 
         if (alreadyExists) {
-      
           const result = await usersCollection.updateOne(query, {
             $set: {
               last_loggedIn: new Date().toISOString(),
@@ -336,7 +407,6 @@ app.post("/create-checkout-session", async (req, res) => {
           });
           return res.send(result);
         }
-
 
         const result = await usersCollection.insertOne(userData);
 
@@ -502,6 +572,59 @@ app.post("/create-checkout-session", async (req, res) => {
       const result = await reviewsCollection.find({ mealId }).toArray();
       res.send(result);
     });
+    app.get("/my-reviews", verifyJWT, async (req, res) => {
+      try {
+        const userEmail = req.tokenEmail;
+        const reviews = await reviewsCollection.find({ userEmail }).toArray();
+        res.send(reviews);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to fetch your reviews" });
+      }
+    });
+    app.delete("/reviews/:id", verifyJWT, async (req, res) => {
+      try {
+        const reviewId = req.params.id;
+        const result = await reviewsCollection.deleteOne({
+          _id: new ObjectId(reviewId),
+          userEmail: req.tokenEmail, // ensures only owner can delete
+        });
+
+        if (result.deletedCount === 1) {
+          res.send({ success: true, message: "Review deleted successfully" });
+        } else {
+          res.status(404).send({ success: false, message: "Review not found" });
+        }
+      } catch (err) {
+        console.error(err);
+        res
+          .status(500)
+          .send({ success: false, message: "Failed to delete review" });
+      }
+    });
+    app.put("/reviews/:id", verifyJWT, async (req, res) => {
+      try {
+        const reviewId = req.params.id;
+        const { rating, comment } = req.body;
+
+        const result = await reviewsCollection.updateOne(
+          { _id: new ObjectId(reviewId), userEmail: req.tokenEmail },
+          { $set: { rating, comment, updatedAt: new Date().toISOString() } }
+        );
+
+        if (result.matchedCount === 1) {
+          res.send({ success: true, message: "Review updated successfully" });
+        } else {
+          res.status(404).send({ success: false, message: "Review not found" });
+        }
+      } catch (err) {
+        console.error(err);
+        res
+          .status(500)
+          .send({ success: false, message: "Failed to update review" });
+      }
+    });
+
     // get all users for admin
     app.get("/users", verifyJWT, verifyADMIN, async (req, res) => {
       const adminEmail = req.tokenEmail;
