@@ -581,6 +581,11 @@ async function run() {
       }
     });
 
+    app.get("/reviews", async (req, res) => {
+      
+      const result = await reviewsCollection.find().toArray();
+      res.send(result);
+    });
     app.get("/reviews/:mealId", async (req, res) => {
       const mealId = req.params.mealId;
       const result = await reviewsCollection.find({ mealId }).toArray();
