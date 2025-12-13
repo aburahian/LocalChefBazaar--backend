@@ -113,13 +113,25 @@ async function run() {
       }
     });
 
-    // get all plants from db
     app.get("/meals", async (req, res) => {
       const result = await mealsCollection.find().toArray();
       res.send(result);
     });
 
-    // get all plants from db
+    app.get("/meals/latest", async (req, res) => {
+      try {
+        const result = await mealsCollection
+          .find()
+          .sort({ createdAt: -1 })
+          .limit(10)
+          .toArray();
+
+        res.send(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to fetch latest meals" });
+      }
+    });
     app.get("/meals/:id", async (req, res) => {
       const id = req.params.id;
       const result = await mealsCollection.findOne({ _id: new ObjectId(id) });
@@ -154,7 +166,7 @@ async function run() {
           mode: "payment",
 
           metadata: {
-           orderId: paymentInfo.orderId, 
+            orderId: paymentInfo.orderId,
             mealId: paymentInfo.mealId,
             customerEmail: paymentInfo.customer?.email,
             quantity: paymentInfo.quantity,
@@ -198,7 +210,6 @@ async function run() {
       try {
         const { sessionId } = req.body;
 
-
         if (!sessionId) {
           return res.status(400).send({ error: "sessionId missing" });
         }
@@ -208,13 +219,11 @@ async function run() {
         if (!session.metadata || !session.metadata.mealId) {
           return res.status(400).send({ error: "mealId missing in metadata" });
         }
- 
-
 
         const orderInfo = {
           transactionId: session.id,
-    
-          mealId:session.metadata.mealId,
+
+          mealId: session.metadata.mealId,
           customerEmail: session.customer_email,
           amount: session.amount_total / 100,
           paymentStatus: "paid",
@@ -222,7 +231,7 @@ async function run() {
         };
         const paymentResult = await paymentCollection.insertOne(orderInfo);
         const orderUpdateResult = await ordersCollection.updateOne(
-           { _id: new ObjectId(session.metadata.orderId) },
+          { _id: new ObjectId(session.metadata.orderId) },
           { $set: { paymentStatus: "paid" } }
         );
 
@@ -259,7 +268,6 @@ async function run() {
           }
 
           const chefId = chefUser.chefId;
-
 
           const result = await ordersCollection.find({ chefId }).toArray();
           res.send(result);
@@ -328,7 +336,6 @@ async function run() {
       }
     });
 
-
     app.get("/favorites", verifyJWT, async (req, res) => {
       const userEmail = req.tokenEmail;
 
@@ -343,7 +350,6 @@ async function run() {
         res.status(500).send({ message: "Failed to fetch favorite meals" });
       }
     });
-
 
     app.delete("/favorites/:id", verifyJWT, async (req, res) => {
       const mealId = req.params.id;
@@ -366,7 +372,6 @@ async function run() {
           .send({ success: false, message: "Failed to remove favorite meal" });
       }
     });
-
 
     app.post("/user", async (req, res) => {
       try {
@@ -431,7 +436,6 @@ async function run() {
       const result = await chefRequestsCollection.insertOne({ email });
       res.send(result);
     });
-
 
     app.get("/chef-requests", verifyJWT, verifyADMIN, async (req, res) => {
       const result = await chefRequestsCollection.find().toArray();
@@ -511,6 +515,31 @@ async function run() {
         res.send({ success: true });
       }
     );
+
+    app.get("/stats", verifyJWT, verifyADMIN, async (req, res) => {
+      const totalPaymentAmount = await paymentCollection
+        .aggregate([
+          { $match: { paymentStatus: "paid" } },
+          { $group: { _id: null, total: { $sum: "$amount" } } },
+        ])
+        .toArray();
+
+      const totalUsers = await usersCollection.countDocuments();
+      const ordersPending = await ordersCollection.countDocuments({
+        orderStatus: "pending",
+      });
+      const ordersDelivered = await ordersCollection.countDocuments({
+        orderStatus: "delivered",
+      });
+
+      res.send({
+        totalPaymentAmount: totalPaymentAmount[0]?.total || 0,
+        totalUsers,
+        ordersPending,
+        ordersDelivered,
+      });
+    });
+
     app.patch(
       "/role-requests/reject/:id",
       verifyJWT,
@@ -631,13 +660,11 @@ async function run() {
       res.send(result);
     });
 
-
     await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
   } finally {
-    
   }
 }
 run().catch(console.dir);
