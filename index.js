@@ -114,8 +114,40 @@ async function run() {
     });
 
     app.get("/meals", async (req, res) => {
-      const result = await mealsCollection.find().toArray();
-      res.send(result);
+      try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 9;
+        const skip = (page - 1) * limit;
+
+        const { search, category } = req.query;
+        const query = {};
+
+        if (search) {
+          query.foodName = { $regex: search, $options: "i" };
+        }
+
+        if (category && category !== "all") {
+          query.category = category;
+        }
+
+        const meals = await mealsCollection
+          .find(query)
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+
+        const total = await mealsCollection.countDocuments(query);
+
+        res.send({
+          meals,
+          total,
+          page,
+          totalPages: Math.ceil(total / limit)
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to fetch meals" });
+      }
     });
 
     app.get("/meals/latest", async (req, res) => {
@@ -582,7 +614,7 @@ async function run() {
     });
 
     app.get("/reviews", async (req, res) => {
-      
+
       const result = await reviewsCollection.find().toArray();
       res.send(result);
     });
