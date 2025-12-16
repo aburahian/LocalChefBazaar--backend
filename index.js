@@ -142,7 +142,7 @@ async function run() {
           meals,
           total,
           page,
-          totalPages: Math.ceil(total / limit)
+          totalPages: Math.ceil(total / limit),
         });
       } catch (err) {
         console.error(err);
@@ -445,6 +445,10 @@ async function run() {
       const result = await usersCollection.findOne({ email: req.tokenEmail });
       res.send({ role: result?.role });
     });
+    app.get("/user/status", verifyJWT, async (req, res) => {
+      const result = await usersCollection.findOne({ email: req.tokenEmail });
+      res.send({ status: result?.status });
+    });
     app.get("/user/:email", async (req, res) => {
       const email = req.params.email;
       try {
@@ -614,7 +618,6 @@ async function run() {
     });
 
     app.get("/reviews", async (req, res) => {
-
       const result = await reviewsCollection.find().toArray();
       res.send(result);
     });
@@ -709,7 +712,20 @@ run().catch(console.dir);
 app.get("/", (req, res) => {
   res.send("Hello from Server..");
 });
+// Global Error Handler
+app.use((err, req, res, next) => {
+  console.error("Global Error Handler Caught:", err);
+  if (res.headersSent) {
+    return next(err);
+  }
+  res.status(err.status || 500).send({
+    message: err.message || "Internal Server Error",
+    error: process.env.NODE_ENV === "development" ? err : {},
+  });
+});
 
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
 });
+
+module.exports = app;
