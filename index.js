@@ -478,37 +478,43 @@ async function run() {
       res.send(result);
     });
     app.post("/role-request", verifyJWT, async (req, res) => {
-      const { requestType } = req.body;
-      const email = req.tokenEmail;
+  const { requestType } = req.body;
+  const email = req.tokenEmail;
 
-      const user = await usersCollection.findOne({ email });
-      if (!user) return res.status(404).send({ message: "User not found" });
+  const user = await usersCollection.findOne({ email });
+  if (!user) return res.status(404).send({ message: "User not found" });
 
-      const exist = await roleRequestsCollection.findOne({
-        userEmail: email,
-        requestStatus: "pending",
-      });
-      if (exist) {
-        return res
-          .status(409)
-          .send({ message: "You already have a pending request" });
-      }
+  if (user.role === requestType) {
+    return res
+      .status(409)
+      .send({ message: `You are already a ${requestType}` });
+  }
 
-      const requestData = {
-        userName: user.name || "",
-        userEmail: email,
-        requestType,
-        requestStatus: "pending",
-        requestTime: new Date().toISOString(),
-      };
+  const exist = await roleRequestsCollection.findOne({
+    userEmail: email,
+    requestType,
+    requestStatus: { $in: ["pending", "approved"] },
+  });
 
-      await roleRequestsCollection.insertOne(requestData);
-      res.send({
-        success: true,
-        message: "Request submitted",
-        request: requestData,
-      });
-    });
+  if (exist) {
+    return res
+      .status(409)
+      .send({ message: "Request already exists" });
+  }
+
+  const requestData = {
+    userName: user.name || "",
+    userEmail: email,
+    requestType,
+    requestStatus: "pending",
+    requestTime: new Date().toISOString(),
+  };
+
+  await roleRequestsCollection.insertOne(requestData);
+
+  res.send({ success: true, message: "Request submitted" });
+});
+
     app.get("/role-requests", verifyJWT, verifyADMIN, async (req, res) => {
       const result = await roleRequestsCollection.find().toArray();
       res.send(result);
