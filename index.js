@@ -155,7 +155,7 @@ async function run() {
         const result = await mealsCollection
           .find()
           .sort({ createdAt: -1 })
-          .limit(10)
+          .limit(6)
           .toArray();
 
         res.send(result);
